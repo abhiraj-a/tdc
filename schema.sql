@@ -1,0 +1,65 @@
+-- WARNING: This schema is for context only and is not meant to be run.
+-- Table order and constraints may not be valid for execution.
+
+CREATE TABLE public.users (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  created_at timestamp with time zone DEFAULT now(),
+  email text NOT NULL UNIQUE,
+  password text NOT NULL,
+  role text DEFAULT 'client'::text CHECK (role = ANY (ARRAY['client'::text, 'matchmaker'::text, 'admin'::text])),
+  status_tag text DEFAULT 'Active'::text CHECK (status_tag = ANY (ARRAY['Active'::text, 'Onboarding'::text, 'Matches Sent'::text, 'Meeting Scheduled'::text, 'On Hold'::text, 'Archived'::text])),
+  avatar_url text,
+  first_name text NOT NULL,
+  last_name text NOT NULL,
+  gender text NOT NULL CHECK (gender = ANY (ARRAY['Male'::text, 'Female'::text, 'Other'::text])),
+  dob date NOT NULL,
+  height_cm integer NOT NULL,
+  country text DEFAULT 'India'::text,
+  city text NOT NULL,
+  phone text,
+  ug_college text,
+  ug_degree text,
+  company text,
+  designation text,
+  income numeric NOT NULL DEFAULT 0,
+  marital_status text NOT NULL DEFAULT 'Never Married'::text CHECK (marital_status = ANY (ARRAY['Never Married'::text, 'Divorced'::text, 'Awaiting Divorce'::text, 'Widowed'::text])),
+  languages ARRAY DEFAULT ARRAY['English'::text, 'Hindi'::text],
+  siblings text DEFAULT 'None'::text,
+  religion text DEFAULT 'Hindu'::text,
+  caste text,
+  diet text DEFAULT 'Vegetarian'::text CHECK (diet = ANY (ARRAY['Vegetarian'::text, 'Non-Vegetarian'::text, 'Eggetarian'::text, 'Jain'::text, 'Vegan'::text])),
+  manglik text DEFAULT 'No'::text CHECK (manglik = ANY (ARRAY['Yes'::text, 'No'::text, 'Partial'::text, 'Don''t Know'::text])),
+  drinking text DEFAULT 'Never'::text CHECK (drinking = ANY (ARRAY['Never'::text, 'Socially'::text, 'Regularly'::text])),
+  smoking text DEFAULT 'Never'::text CHECK (smoking = ANY (ARRAY['Never'::text, 'Occasionally'::text, 'Regularly'::text])),
+  want_kids text DEFAULT 'Yes'::text CHECK (want_kids = ANY (ARRAY['Yes'::text, 'No'::text, 'Maybe'::text])),
+  open_to_relocate text DEFAULT 'Yes'::text CHECK (open_to_relocate = ANY (ARRAY['Yes'::text, 'No'::text, 'Maybe'::text])),
+  open_to_pets text DEFAULT 'Yes'::text CHECK (open_to_pets = ANY (ARRAY['Yes'::text, 'No'::text, 'Maybe'::text])),
+  notes text DEFAULT ''::text,
+  CONSTRAINT users_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.messages (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  created_at timestamp with time zone DEFAULT now(),
+  sender_id uuid NOT NULL,
+  receiver_id uuid NOT NULL,
+  message text NOT NULL,
+  is_read boolean DEFAULT false,
+  CONSTRAINT messages_pkey PRIMARY KEY (id),
+  CONSTRAINT messages_sender_id_fkey FOREIGN KEY (sender_id) REFERENCES public.users(id),
+  CONSTRAINT messages_receiver_id_fkey FOREIGN KEY (receiver_id) REFERENCES public.users(id)
+);
+CREATE TABLE public.match_assignments (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  created_at timestamp with time zone DEFAULT now(),
+  client_id uuid NOT NULL,
+  suggested_match_id uuid NOT NULL,
+  matchmaker_id uuid,
+  status text DEFAULT 'Suggested'::text CHECK (status = ANY (ARRAY['Suggested'::text, 'Sent'::text, 'Accepted'::text, 'Rejected'::text])),
+  ai_score integer,
+  ai_reasoning text,
+  pitch_note text,
+  CONSTRAINT match_assignments_pkey PRIMARY KEY (id),
+  CONSTRAINT match_assignments_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.users(id),
+  CONSTRAINT match_assignments_suggested_match_id_fkey FOREIGN KEY (suggested_match_id) REFERENCES public.users(id),
+  CONSTRAINT match_assignments_matchmaker_id_fkey FOREIGN KEY (matchmaker_id) REFERENCES public.users(id)
+);
