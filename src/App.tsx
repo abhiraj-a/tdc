@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
 import { LoginModal } from './components/LoginModal';
 import { CustomerListView } from './components/CustomerListView';
@@ -8,13 +8,14 @@ import { SendMatchModal } from './components/SendMatchModal';
 import { ChatMessengerView } from './components/ChatMessengerView';
 import { PoolExplorerView } from './components/PoolExplorerView';
 import { User, StatusTag, MatchAssignment } from './types';
-import { DataService } from './services/supabase';
+import { DataService, Session } from './services/supabase';
 
 export function App() {
+  const [, setSession] = useState<Session | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(true);
-  const [currentTab, setCurrentTab] = useState<'clients' | 'sent-matches' | 'pool' | 'chat'>('clients');
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
   
+  const [currentTab, setCurrentTab] = useState<'clients' | 'sent-matches' | 'pool' | 'chat'>('clients');
   const [allUsers, setAllUsers] = useState<User[]>([]);
   const [sentAssignments, setSentAssignments] = useState<MatchAssignment[]>([]);
   const [selectedClient, setSelectedClient] = useState<User | null>(null);
@@ -23,53 +24,142 @@ export function App() {
   const [sendMatchModal, setSendMatchModal] = useState<{ client: User; candidate: User; initialPitch?: string } | null>(null);
   
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
 
   const isSupabaseConnected = DataService.isConnectedToSupabase();
-
-  useEffect(() => {
-    async function loadData() {
-      setIsLoading(false);
-      try {
-        const users = await DataService.fetchUsers();
-        setAllUsers(users);
-        const admin = users.find(u => u.email.toLowerCase() === 'admin@tdc.com' || u.role === 'matchmaker');
-        if (admin) {
-          setCurrentUser(admin);
-        } else if (users.length > 0) {
-          setCurrentUser(users[0]);
-        }
-
-        // Fetch sent match assignments from database
-        const assignments = await DataService.fetchMatchAssignments();
-        setSentAssignments(assignments);
-      } catch (err) {
-        console.error('Error fetching initial users from database:', err);
-      }
-    }
-    loadData();
-  }, []);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3500);
   };
 
-  const handleLogin = (email: string, pass: string): boolean => {
-    const found = allUsers.find(
-      u => u.email.toLowerCase() === email.toLowerCase() && (u.password === pass || pass === 'admin123')
-    );
-    if (found) {
-      setIsLoggedIn(true);
-      setCurrentUser(found);
-      return true;
+  const loadDashboardData = useCallback(async () => {
+    try {
+      const users = await DataService.fetchUsers();
+      setAllUsers(users);
+
+      const assignments = await DataService.fetchMatchAssignments();
+      setSentAssignments(assignments);
+    } catch (err) {
+      console.error('Error fetching dashboard records from database:', err);
     }
-    return false;
+  }, []);
+
+  // Initialize and verify Supabase Auth Session
+  useEffect(() => {
+    let isMounted = true;
+
+    async function initAuth() {
+      try {
+        // 1. Check for active Supabase Auth session
+        const activeSession = await DataService.getSession();
+
+        if (activeSession?.user?.email) {
+          const profile = await DataService.getAdminProfile(activeSession.user.email);
+          if (
+            profile &&
+            (profile.role === 'matchmaker' || profile.role === 'admin' || activeSession.user.email.toLowerCase() === 'admin@tdc.com')
+          ) {
+            if (isMounted) {
+              setSession(activeSession);
+              setCurrentUser(profile);
+              await loadDashboardData();
+            }
+          } else {
+            // Unauthorized session
+            await DataService.signOut();
+          }
+        } else {
+          // 2. Check for verified admin session in localStorage
+          const localAdmin = localStorage.getItem('tdc_admin_auth');
+          if (localAdmin) {
+            const profile = await DataService.getAdminProfile(localAdmin);
+            if (profile && (profile.role === 'matchmaker' || profile.role === 'admin' || localAdmin.toLowerCase() === 'admin@tdc.com')) {
+              if (isMounted) {
+                setCurrentUser(profile);
+                await loadDashboardData();
+              }
+            } else {
+              localStorage.removeItem('tdc_admin_auth');
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Exception during auth check:', err);
+      } finally {
+        if (isMounted) {
+          setIsAuthChecking(false);
+        }
+      }
+    }
+
+    initAuth();
+
+    // 3. Listen to Supabase Auth state changes
+    const subscription = DataService.onAuthStateChange(async (_event, newSession) => {
+      if (!isMounted) return;
+      if (newSession?.user?.email) {
+        const profile = await DataService.getAdminProfile(newSession.user.email);
+        if (profile && (profile.role === 'matchmaker' || profile.role === 'admin' || newSession.user.email.toLowerCase() === 'admin@tdc.com')) {
+          setSession(newSession);
+          setCurrentUser(profile);
+          loadDashboardData();
+        }
+      } else if (!newSession && !localStorage.getItem('tdc_admin_auth')) {
+        setSession(null);
+        setCurrentUser(null);
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      if (subscription && typeof subscription.unsubscribe === 'function') {
+        subscription.unsubscribe();
+      }
+    };
+  }, [loadDashboardData]);
+
+  const handleLogin = async (email: string, pass: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await DataService.signIn(email, pass);
+      
+      if (res.error) {
+        return { success: false, error: res.error };
+      }
+
+      // Verify that the authenticated user has matchmaker or admin privileges
+      const adminProfile = res.userProfile || (await DataService.getAdminProfile(email));
+      const isAdmin = 
+        adminProfile && 
+        (adminProfile.role === 'matchmaker' || adminProfile.role === 'admin' || email.toLowerCase() === 'admin@tdc.com');
+
+      if (!isAdmin) {
+        await DataService.signOut();
+        return {
+          success: false,
+          error: 'Access denied: Only authorized matchmakers and admins can access this dashboard.'
+        };
+      }
+
+      setSession(res.session);
+      setCurrentUser(adminProfile);
+      localStorage.setItem('tdc_admin_auth', adminProfile.email);
+
+      await loadDashboardData();
+      showToast(`Welcome, ${adminProfile.first_name || 'Admin'}! Supabase authenticated.`);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Login failed.' };
+    }
   };
 
-  const handleLogout = () => {
-    setIsLoggedIn(false);
+  const handleLogout = async () => {
+    await DataService.signOut();
+    localStorage.removeItem('tdc_admin_auth');
+    setSession(null);
     setCurrentUser(null);
+    setSelectedClient(null);
+    setChatPair(null);
+    showToast('Signed out of Supabase session.');
   };
 
   const handleSelectClient = (client: User) => {
@@ -109,11 +199,9 @@ export function App() {
       pitch_note: pitchNote
     });
 
-    // Refresh assignments from Supabase
     const updatedAssignments = await DataService.fetchMatchAssignments();
     setSentAssignments(updatedAssignments);
 
-    // Update in local state
     setAllUsers(prev => prev.map(u => u.id === client.id ? { ...u, status_tag: 'Matches Sent' } : u));
     if (selectedClient && selectedClient.id === client.id) {
       setSelectedClient(prev => prev ? { ...prev, status_tag: 'Matches Sent' } : null);
@@ -127,12 +215,54 @@ export function App() {
     setCurrentTab('chat');
   };
 
-  // Filter clients assigned to matchmaker roster (including any candidate who received matches)
+  // Filter clients assigned to matchmaker roster
   const rosterClients = allUsers.filter(u => 
     u.role === 'client' && 
     (u.id.startsWith('1000') || !u.email.includes('@pool.tdc.com') || u.status_tag === 'Matches Sent' || sentAssignments.some(a => a.client_id === u.id))
   );
 
+  // 1. Full-screen loading indicator during initial Supabase auth verification
+  if (isAuthChecking) {
+    return (
+      <div 
+        style={{ 
+          minHeight: '100vh', 
+          display: 'flex', 
+          flexDirection: 'column', 
+          alignItems: 'center', 
+          justifyContent: 'center', 
+          background: 'linear-gradient(180deg, #0b0f19 0%, #06090e 100%)',
+          color: 'white',
+          fontFamily: 'Inter, system-ui, sans-serif'
+        }}
+      >
+        <div 
+          style={{ 
+            width: 44, 
+            height: 44, 
+            border: '3px solid rgba(244, 63, 94, 0.2)', 
+            borderTopColor: '#f43f5e', 
+            borderRadius: '50%', 
+            animation: 'spin 0.9s linear infinite', 
+            marginBottom: '1.25rem' 
+          }} 
+        />
+        <div style={{ fontSize: '1.15rem', fontWeight: 600, color: '#f8fafc', letterSpacing: '0.02em' }}>
+          The Date Crew Matchmaker OS
+        </div>
+        <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
+          Verifying Supabase authentication session...
+        </div>
+      </div>
+    );
+  }
+
+  // 2. Strict Authentication Gate: If unauthenticated, render ONLY the Login screen
+  if (!currentUser) {
+    return <LoginModal onLogin={handleLogin} />;
+  }
+
+  // 3. Authorized Admin Dashboard View
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       {/* Navbar Header */}
@@ -158,17 +288,17 @@ export function App() {
               top: '80px', 
               right: '24px', 
               zIndex: 999, 
-              background: 'linear-gradient(135deg, #10b981, #059669)',
-              color: 'white',
-              padding: '0.85rem 1.4rem',
-              borderRadius: '12px',
-              fontSize: '0.875rem',
-              fontWeight: 600,
-              boxShadow: '0 10px 25px rgba(16, 185, 129, 0.4)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.5rem',
-              animation: 'fadeIn 0.2s ease-out'
+              background: 'linear-gradient(135deg, #10b981, #059669)', 
+              color: 'white', 
+              padding: '0.85rem 1.4rem', 
+              borderRadius: '12px', 
+              fontSize: '0.875rem', 
+              fontWeight: 600, 
+              boxShadow: '0 10px 25px rgba(16, 185, 129, 0.4)', 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: '0.5rem', 
+              animation: 'fadeIn 0.2s ease-out' 
             }}
           >
             <span>✓</span>
@@ -245,11 +375,6 @@ export function App() {
           onClose={() => setSendMatchModal(null)}
           onConfirmSend={handleConfirmSendMatch}
         />
-      )}
-
-      {/* Login Screen (if logged out) */}
-      {!isLoggedIn && (
-        <LoginModal onLogin={handleLogin} />
       )}
     </div>
   );

@@ -235,7 +235,6 @@ npm run build
 | Role | Username / Email | Password |
 | :--- | :--- | :--- |
 | Lead Matchmaker | `admin@tdc.com` | `admin123` |
-| Client Profile | `vikram.singhania@example.com` | `password123` |
-| Client Profile | `ananya.deshmukh@example.com` | `password123` |
+
 
 The login screen provides a one-click demo login option to populate the matchmaker credentials instantly.

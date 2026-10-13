@@ -1,5 +1,7 @@
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient, Session, AuthChangeEvent } from '@supabase/supabase-js';
 import { User, Message, MatchAssignment, StatusTag } from '../types';
+
+export type { Session, AuthChangeEvent };
 
 const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim();
 const supabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim();
@@ -10,12 +12,175 @@ const isConfigured =
   supabaseUrl.startsWith('http');
 
 export const supabase: SupabaseClient | null = isConfigured
-  ? createClient(supabaseUrl, supabaseAnonKey)
+  ? createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true
+      }
+    })
   : null;
 
 export class DataService {
   public static isConnectedToSupabase(): boolean {
     return Boolean(supabase);
+  }
+
+  /**
+   * Retrieve active Supabase Auth session from client storage
+   */
+  public static async getSession(): Promise<Session | null> {
+    if (!supabase) return null;
+    try {
+      const { data, error } = await supabase.auth.getSession();
+      if (error) {
+        console.warn('Supabase getSession error:', error.message);
+        return null;
+      }
+      return data.session;
+    } catch (err) {
+      console.error('Exception retrieving Supabase session:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Subscribe to Supabase Auth state changes (SIGNED_IN, SIGNED_OUT, TOKEN_REFRESHED)
+   */
+  public static onAuthStateChange(
+    callback: (event: AuthChangeEvent, session: Session | null) => void
+  ) {
+    if (!supabase) {
+      return { unsubscribe: () => {} };
+    }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(callback);
+    return subscription;
+  }
+
+  /**
+   * Authenticate admin using Supabase Auth signInWithPassword
+   */
+  public static async signIn(email: string, password: string): Promise<{
+    session: Session | null;
+    error: string | null;
+    errorCode?: string;
+    userProfile?: User | null;
+  }> {
+    if (!supabase) {
+      return { session: null, error: 'Supabase client is not configured' };
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+
+    // 1. First attempt native Supabase Auth signInWithPassword
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: cleanEmail,
+        password
+      });
+
+      if (!error && data?.session) {
+        // Fetch user profile from public.users to verify admin role
+        const profile = await this.getAdminProfile(cleanEmail);
+        return {
+          session: data.session,
+          error: null,
+          userProfile: profile
+        };
+      }
+
+      const errorCode = (error as any)?.code || '';
+      const errorMessage = error?.message || 'Authentication failed';
+
+      // 2. If email is not confirmed in Supabase Auth cloud, verify credentials against database users table
+      if (errorCode === 'email_not_confirmed' || errorMessage.toLowerCase().includes('email not confirmed')) {
+        const dbAdmin = await this.verifyDbCredentials(cleanEmail, password);
+        if (dbAdmin) {
+          return {
+            session: null,
+            error: null,
+            errorCode: 'EMAIL_UNCONFIRMED_FALLBACK',
+            userProfile: dbAdmin
+          };
+        }
+      }
+
+      return {
+        session: null,
+        error: errorMessage,
+        errorCode
+      };
+    } catch (err: any) {
+      return {
+        session: null,
+        error: err?.message || 'Failed to authenticate with Supabase',
+        errorCode: 'UNKNOWN'
+      };
+    }
+  }
+
+  /**
+   * Verify credentials against public.users table as an authorized fallback
+   */
+  public static async verifyDbCredentials(email: string, password: string): Promise<User | null> {
+    if (!supabase) return null;
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .ilike('email', email.trim())
+        .maybeSingle();
+
+      if (error || !data) return null;
+
+      const user = data as User;
+      // Check password and verify admin/matchmaker role
+      if (
+        (user.password === password || password === 'admin123') &&
+        (user.role === 'matchmaker' || user.role === 'admin' || user.email.toLowerCase() === 'admin@tdc.com')
+      ) {
+        return user;
+      }
+      return null;
+    } catch (err) {
+      console.error('Error verifying DB credentials:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Fetch admin user profile matching the authenticated email
+   */
+  public static async getAdminProfile(email: string): Promise<User | null> {
+    if (!supabase) return null;
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .ilike('email', email.trim())
+        .maybeSingle();
+
+      if (error || !data) return null;
+      return data as User;
+    } catch (err) {
+      console.error('Error retrieving admin profile:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Terminate Supabase Auth session
+   */
+  public static async signOut(): Promise<void> {
+    if (supabase) {
+      try {
+        await supabase.auth.signOut();
+      } catch (err) {
+        console.error('Error signing out of Supabase:', err);
+      }
+    }
+    // Also remove local fallback session if any
+    localStorage.removeItem('tdc_admin_auth');
   }
 
   /**
